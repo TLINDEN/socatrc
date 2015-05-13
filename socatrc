@@ -1,0 +1,229 @@
+#!/usr/bin/perl -w
+
+package Socat::RC;
+
+use strict;
+use Getopt::Long;
+use Data::Dumper;
+use File::Spec;
+
+$Socat::RC::VERSION = 0.01;
+our($daemon, $socat, $config, $version, $verbose, $help, $cfg, $piddir, $mode);
+
+sub usage {
+  print STDERR qq(
+Usage: socatrc [-dscvh] <mode>
+
+Options:
+ --daemon | -d <path>    location of daemon program
+ --socat  | -s <path>    location of socat program
+ --piddir | -p <path>    location for pidfile storage
+ --config | -c <path>    location of config
+ --help   | -h | -?      print usage
+ --version| -v           print version
+
+Mode might be one of: start,stop,status or restart.
+);
+  exit 1;
+}
+
+
+sub parseini {
+  my $config = shift;
+  if (open C, "<$config") {
+    my %c;
+    my $sec = 'global';
+    while (<C>) {
+      # ignore comments
+      next if(/^\s*$/ || /^\s*#/);
+
+      # clean up
+      s/#.*//;
+      s/^\s*//;
+      chomp;
+
+      if (/^\[([a-zA-Z0-9\-_:]*)\]/) {
+	# a section
+	$sec = $1;
+      }
+
+      if (/=/) {
+	# an option
+	my($opt, $val) = split /\s*=\s*/, $_, 2;
+	$c{$sec}->{$opt} = $val;
+      }
+    }
+
+    # done parsing
+    close C;
+
+    # resolve vars, if any
+    foreach my $sec (keys %c) {
+      foreach my $opt (keys %{$c{$sec}}) {
+	my $v;
+	$c{$sec}->{$opt} =~ s{\$\{([a-zA-Z0-9]*)\}}{
+	  $v = $1;
+	  if (exists $c{global}->{$v}) {
+	    $c{global}->{$v};
+	  }
+	  else {
+	    '';
+	  }
+	  }xe;
+      }
+    }
+
+    return \%c;
+  }
+  else {
+    print STDERR "Could not open config $config: $!\n";
+    exit 1;
+  }
+}
+
+sub checkrunning {
+  my $pidfile = shift;
+
+  if (-e $pidfile) {
+    if (open P, "<$pidfile") {
+      my $pid = <P>;
+      chomp $pid;
+      close P;
+
+      if ($pid =~ /^\d+$/) {
+	if (kill 0, $pid) {
+	  # runs
+	  return $pid;
+	}
+	else {
+	  return 0;
+	}
+      }
+      else {
+	# empty pidfile or pid not a number
+	return 0;
+      }
+    }
+    else {
+      print STDERR "Could not open pidfile $pidfile: $!\n";
+      return 0;
+    }
+  }
+  else {
+    # no pidfile
+    return 0;
+  }
+}
+
+
+sub start {
+  my ($title, $runpid, $pidfile, $listener) = @_;
+  if ($runpid) {
+    print "$title is already running: $runpid\n";
+  }
+  else {
+    my $cmd = "$daemon -c -f -p $pidfile $socat $cfg->{$listener}->{args} " . 
+      "$cfg->{$listener}->{listen} $cfg->{$listener}->{sendto}";
+    system($cmd);
+    print "$title started\n";
+    if ($verbose) {
+      print "Tried: $cmd\n";
+    }
+  }
+}
+
+sub stop {
+  my ($title, $runpid, $pidfile, $listener) = @_;
+  if (! $runpid) {
+    print "$title is not running\n";
+  }
+  else {
+    $| = 1;
+    print "$title stopping $runpid ... ";
+    kill 15, $runpid;
+    sleep 1;
+    if (kill 0, $runpid) {
+      kill 9, $runpid;
+      sleep 1;
+      if (kill 0, $runpid) {
+	print " giving up, unable to kill\n";
+      }
+    }
+    print "ok\n";
+  }
+}
+
+
+# defaults
+$config = '/usr/local/etc/socatrc.conf';
+
+# parse commandline
+Getopt::Long::Configure( qw(no_ignore_case));
+if (! GetOptions (
+                  "daemon|d=s"      => \$daemon,
+                  "socat|s=s"       => \$socat,
+		  "piddir|p=s"      => \$piddir,
+                  "config|c=s"      => \$config,
+                  "version|v"       => \$version,
+		  "verbose|V"       => \$verbose,
+                  "help|h|?"        => \$help,
+                 )    ) {
+  usage();
+}
+
+$mode = shift;
+
+if ($version) {
+  print STDERR "socatrc $Socat::RC::VERSION\n";
+  exit 0;
+}
+
+if ($help) {
+  usage;
+}
+
+if (!$mode) {
+  usage;
+}
+
+# parse config
+$cfg    = parseini($config);
+$daemon = $daemon ? $daemon : $cfg->{global}->{daemon} ? $cfg->{global}->{daemon} : 'daemon';
+$socat  = $socat  ? $socat  : $cfg->{global}->{socat}  ? $cfg->{global}->{socat}  : 'socat';
+$piddir = $piddir ? $piddir : $cfg->{global}->{piddir} ? $cfg->{global}->{piddir} : '/var/run';
+
+
+# go ahead
+foreach my $listener (sort keys %{$cfg}) {
+  next if($listener eq 'global');
+  my $pidfile = File::Spec->catfile($piddir, "socatrc-$listener.pid");
+  my $runpid  = checkrunning($pidfile);
+  my $title   = "socat worker $listener";
+
+  if ($mode eq 'status') {
+    if ($runpid) {
+      print "$title is running: $runpid\n";
+    }
+    else {
+      print "$title is not running\n";
+    }
+  }
+
+  elsif ($mode eq 'start') {
+    start($title, $runpid, $pidfile, $listener);
+  }
+
+  elsif ($mode eq 'stop') {
+    stop($title, $runpid, $pidfile, $listener);
+  }
+
+  elsif ($mode eq 'restart') {
+    stop($title, $runpid, $pidfile, $listener);
+    my $runpid  = checkrunning($pidfile);
+    start($title, $runpid, $pidfile, $listener);
+  }
+
+  else {
+    usage;
+  }
+}
