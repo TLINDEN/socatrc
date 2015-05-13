@@ -1,10 +1,9 @@
 ## socatrc - socat init.d wrapper
 
-This is the README file for the socatrc.
+This is the README file for socatrc.
 
 Socatrc is a small perl script which can be used to start
-(and stop) multiple instances of socat via init.d (or upstart
-or whatever you use).
+(and stop) multiple instances of socat via init.d.
 
 ## Documentation
 
