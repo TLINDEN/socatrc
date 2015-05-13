@@ -53,7 +53,6 @@ socat $args $listen $sendto
 ```
 
 You can define global variables and use them inside process definitions.
-There might be as multiple processes as you want.
 
 To start the socat processes run:
 
